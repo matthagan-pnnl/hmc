@@ -1,53 +1,110 @@
+use rand::{Rng, RngExt};
+use rand_distr::Poisson;
+
+use crate::sampler::AliasSampler;
+
 const STEP_SIZE: f64 = 1e-7;
 
-struct HamiltonianSystem<F>
+pub mod sampler;
+
+pub fn kahan_summation(data: &[f64]) -> f64 {
+    let mut tot = 0.0;
+    let mut carry = 0.0;
+    for x in data.iter() {
+        let y = x - carry;
+        let t = tot + y;
+        carry = (t - tot) - y;
+        tot = t;
+    }
+    tot
+}
+
+pub fn leapfrog<F>(
+    x: &mut [f64],
+    p: &mut [f64],
+    mass: f64,
+    n_steps: usize,
+    delta_t: f64,
+    potential_energy: &F,
+) where
+    F: Fn(&[f64]) -> f64,
+{
+    assert!(n_steps > 0);
+    let grad = finite_difference(&x, potential_energy);
+
+    for ix in 0..p.len() {
+        p[ix] -= 0.5 * delta_t * grad[ix];
+    }
+
+    for n_step in 0..n_steps {
+        for ix in 0..x.len() {
+            x[ix] += (delta_t / mass) * p[ix];
+        }
+
+        let grad = finite_difference(&x, potential_energy);
+        if n_step == n_steps - 1 {
+            for ix in 0..p.len() {
+                p[ix] -= 0.5 * delta_t * grad[ix];
+            }
+        } else {
+            for ix in 0..p.len() {
+                p[ix] -= delta_t * grad[ix];
+            }
+        }
+    }
+}
+
+struct PoissonHMC<F>
 where
     F: Fn(&[f64]) -> f64,
 {
-    x: Vec<f64>,
-    p: Vec<f64>,
     potential_energy: F,
     mass: f64,
+    beta: f64,
+    epsilon: f64,
+    step_size_sampler: Poisson<f64>,
 }
 
-impl<F> HamiltonianSystem<F>
+impl<F> PoissonHMC<F>
 where
     F: Fn(&[f64]) -> f64,
 {
     /// sets all mass dimensions equal for now
-    pub fn new(initial_x: Vec<f64>, initial_p: Vec<f64>, potential_energy: F, mass: f64) -> Self {
+    pub fn new(
+        potential_energy: F,
+        mass: f64,
+        beta: f64,
+        average_simulation_time: f64,
+        step_size: f64,
+    ) -> Self {
+        let poisson_average = average_simulation_time / step_size;
         Self {
-            x: initial_x,
-            p: initial_p,
             potential_energy,
             mass,
+            beta,
+            epsilon: step_size,
+            step_size_sampler: Poisson::new(poisson_average).unwrap(),
         }
     }
 
-    pub fn leapfrog(&mut self, n_steps: usize, delta_t: f64) {
-        assert!(n_steps > 0);
-        let grad = finite_difference(&self.x, &self.potential_energy);
-
-        for ix in 0..self.p.len() {
-            self.p[ix] -= 0.5 * delta_t * grad[ix];
-        }
-
-        for n_step in 0..n_steps {
-            for ix in 0..self.x.len() {
-                self.x[ix] += (delta_t / self.mass) * self.p[ix];
-            }
-
-            let grad = finite_difference(&self.x, &self.potential_energy);
-            if n_step == n_steps - 1 {
-                for ix in 0..self.p.len() {
-                    self.p[ix] -= 0.5 * delta_t * grad[ix];
-                }
-            } else {
-                for ix in 0..self.p.len() {
-                    self.p[ix] -= delta_t * grad[ix];
-                }
-            }
-        }
+    pub fn apply_transition<R: Rng>(&self, x: &mut [f64], p: &mut [f64], rng: &mut R) {
+        let num_steps = rng.sample(self.step_size_sampler).round() as usize;
+        let energy_before = (self.potential_energy)(x)
+            + p.iter()
+                .map(|p_i| p_i * p_i / (2.0 * self.mass))
+                .sum::<f64>();
+        leapfrog(
+            x,
+            p,
+            self.mass,
+            num_steps,
+            self.epsilon,
+            &self.potential_energy,
+        );
+        let energy_after = (self.potential_energy)(x)
+            + p.iter()
+                .map(|p_i| p_i * p_i / (2.0 * self.mass))
+                .sum::<f64>();
     }
 }
 
