@@ -1,11 +1,12 @@
-use rand::{Rng, RngExt};
-use rand_distr::{Normal, Poisson, Uniform};
-
 const STEP_SIZE: f64 = 1e-7;
 
+pub mod export;
+pub mod gui;
 pub mod metropolis_hastings;
 pub mod momentum_checker;
 pub mod potential_sampler;
+pub mod potentials;
+pub mod run;
 pub mod sampler;
 
 pub fn kahan_summation(data: &[f64]) -> f64 {

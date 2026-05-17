@@ -76,8 +76,53 @@ where
             .collect()
     }
 
+    /// Like `scan_masses`, but also returns the raw recorded momenta for
+    /// each mass (per-iteration, first-dimension only — sufficient for
+    /// histogramming a 1-D momentum distribution).
+    ///
+    /// The returned tuple is `(mass, variance, momenta_first_dim)`.
+    pub fn scan_masses_with_samples(
+        &self,
+        mass_upper_bound: f64,
+        num_masses: usize,
+        position_samples: &[Vec<f64>],
+        n_iterations: usize,
+    ) -> Vec<(f64, f64, Vec<f64>)> {
+        let index_dist = Uniform::new(0, position_samples.len()).unwrap();
+        (1..=num_masses)
+            .map(|i| {
+                let mass = i as f64 * mass_upper_bound / num_masses as f64;
+                let epsilon = self.epsilon * mass / self.mass;
+                let step_sampler =
+                    Poisson::new(self.average_simulation_time / epsilon).unwrap();
+                let momentum_dist = Normal::new(0.0, (mass / self.beta).sqrt()).unwrap();
+                let mut rng = rand::rng();
+                let mut p: Vec<f64> = (0..self.dimensions)
+                    .map(|_| rng.sample(momentum_dist))
+                    .collect();
+                let mut recorded_momenta: Vec<Vec<f64>> = Vec::with_capacity(n_iterations);
+                for _ in 0..n_iterations {
+                    let n_steps = (rng.sample(step_sampler).round() as usize).max(1);
+                    let mut x = position_samples[rng.sample(index_dist)].clone();
+                    leapfrog(&mut x, &mut p, mass, n_steps, epsilon, &self.potential_energy);
+                    recorded_momenta.push(p.clone());
+                }
+                let mean_var = (0..self.dimensions)
+                    .map(|dim| {
+                        let values: Vec<f64> = recorded_momenta.iter().map(|p| p[dim]).collect();
+                        let (_mean, std) = crate::avg_and_std(&values);
+                        std * std
+                    })
+                    .sum::<f64>()
+                    / self.dimensions as f64;
+                let first_dim: Vec<f64> = recorded_momenta.iter().map(|p| p[0]).collect();
+                (mass, mean_var, first_dim)
+            })
+            .collect()
+    }
+
     /// Sweeps over `num_masses` evenly-spaced mass values up to `mass_upper_bound`,
-    /// running the momentum chain for each, and returns `(mass, std)` pairs.
+    /// running the momentum chain for each, and returns `(mass, variance)` pairs.
     pub fn scan_masses(
         &self,
         mass_upper_bound: f64,
@@ -114,7 +159,7 @@ where
                     })
                     .sum::<f64>()
                     / self.dimensions as f64;
-                (mass, mean_var.sqrt())
+                (mass, mean_var)
             })
             .collect()
     }

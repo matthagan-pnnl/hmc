@@ -48,6 +48,18 @@ where
     }
 
     pub fn run_chain(&self, num_iterations: usize) -> Vec<Vec<f64>> {
+        self.run_chain_with_progress(num_iterations, |_, _| {})
+    }
+
+    /// Like `run_chain`, but invokes `on_progress(completed, total)` periodically.
+    pub fn run_chain_with_progress<P>(
+        &self,
+        num_iterations: usize,
+        mut on_progress: P,
+    ) -> Vec<Vec<f64>>
+    where
+        P: FnMut(usize, usize),
+    {
         let mut rng = rand::rng();
         let mut x: Vec<f64> = self
             .position_bounds
@@ -60,8 +72,7 @@ where
             self.apply_transition(&mut x, &mut rng);
             chain_history.push(x.clone());
             if (iteration + 1) % progress_interval == 0 {
-                let percentage = ((iteration + 1) as f64 / num_iterations as f64) * 100.0;
-                println!("Progress: {:.0}%", percentage);
+                on_progress(iteration + 1, num_iterations);
             }
         }
         chain_history
