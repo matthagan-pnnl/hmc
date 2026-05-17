@@ -1,6 +1,8 @@
 use clap::Parser;
+use hmc::metropolis_hastings::MetropolisHastings;
+use hmc::momentum_checker::MomentumChecker;
+use hmc::potential_sampler::PoissonHMC;
 use kuva::prelude::*;
-use hmc::PoissonHMC;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -36,6 +38,76 @@ struct Cli {
     /// Acceptance temperature (optional)
     #[arg(long)]
     acceptance_temp: Option<f64>,
+
+    /// Upper bound for mass scan in momentum checker
+    #[arg(long, default_value = "2.0")]
+    mass_upper_bound: f64,
+
+    /// Number of masses to scan in momentum checker
+    #[arg(long, default_value = "20")]
+    num_masses: usize,
+
+    /// Iterations per mass for momentum checker
+    #[arg(long, default_value = "500")]
+    check_iterations: usize,
+
+    /// Proposal std for Metropolis-Hastings
+    #[arg(long, default_value = "0.5")]
+    proposal_std: f64,
+
+    /// Percentage of samples to discard as burn-in before momentum checking (0–100)
+    #[arg(long, default_value = "10")]
+    burn_in_percent: f64,
+}
+
+fn plot_momentum_std_vs_mass<F: Fn(&[f64]) -> f64>(
+    potential: F,
+    hmc_samples: &[Vec<f64>],
+    mh_samples: &[Vec<f64>],
+    cli: &Cli,
+) {
+    let hmc_drop = ((cli.burn_in_percent / 100.0) * hmc_samples.len() as f64).round() as usize;
+    let hmc_samples = &hmc_samples[hmc_drop.min(hmc_samples.len())..];
+    let mh_drop = ((cli.burn_in_percent / 100.0) * mh_samples.len() as f64).round() as usize;
+    let mh_samples = &mh_samples[mh_drop.min(mh_samples.len())..];
+
+    let checker = MomentumChecker::new(
+        potential,
+        cli.beta,
+        cli.mass,
+        cli.step_size,
+        cli.avg_sim_time,
+        cli.dimensions,
+    );
+    let hmc_results = checker.scan_masses(
+        cli.mass_upper_bound,
+        cli.num_masses,
+        hmc_samples,
+        cli.check_iterations,
+    );
+    let mh_results = checker.scan_masses(
+        cli.mass_upper_bound,
+        cli.num_masses,
+        mh_samples,
+        cli.check_iterations,
+    );
+    let expected: Vec<(f64, f64)> = (1..=cli.num_masses)
+        .map(|i| {
+            let mass = i as f64 * cli.mass_upper_bound / cli.num_masses as f64;
+            (mass, (mass / cli.beta).sqrt())
+        })
+        .collect();
+    let hmc_line = LinePlot::new().with_data(hmc_results).with_color("steelblue").with_legend("HMC");
+    let mh_line = LinePlot::new().with_data(mh_results).with_color("mediumseagreen").with_legend("MH");
+    let expected_line = LinePlot::new().with_data(expected).with_color("coral").with_legend("Expected");
+    let plots: Vec<Plot> = vec![hmc_line.into(), mh_line.into(), expected_line.into()];
+    let layout = Layout::auto_from_plots(&plots)
+        .with_title("Momentum Std vs Mass")
+        .with_x_label("Mass")
+        .with_y_label("Std");
+    let pdf = render_to_pdf(plots, layout).unwrap();
+    std::fs::write("momentum_std_vs_mass.pdf", pdf).unwrap();
+    println!("Plot saved to momentum_std_vs_mass.pdf");
 }
 
 fn main() {
@@ -43,7 +115,8 @@ fn main() {
 
     let x_left = -1.0;
     let x_right = 1.0;
-    let potential = |x: &[f64]| (x[0] - x_left) * (x[0] - x_left) * (x[0] - x_right) * (x[0] - x_right);
+    let potential =
+        |x: &[f64]| (x[0] - x_left) * (x[0] - x_left) * (x[0] - x_right) * (x[0] - x_right);
 
     let sampler = PoissonHMC::new(
         potential,
@@ -56,7 +129,10 @@ fn main() {
         None,
     );
 
-    println!("Running {} HMC chain(s) with {} iterations each...", cli.num_chains, cli.iterations);
+    println!(
+        "Running {} HMC chain(s) with {} iterations each...",
+        cli.num_chains, cli.iterations
+    );
     let mut all_samples: Vec<Vec<f64>> = Vec::new();
     let mut all_samples_1d: Vec<f64> = Vec::new();
 
@@ -70,9 +146,30 @@ fn main() {
 
     let samples_1d = all_samples_1d;
 
-    // Create scatter plot of chain samples with potential energy
+    let mh_sampler = MetropolisHastings::new(
+        potential,
+        cli.beta,
+        cli.dimensions,
+        cli.proposal_std,
+        None,
+    );
+    println!(
+        "Running {} MH chain(s) with {} iterations each...",
+        cli.num_chains, cli.iterations
+    );
+    let mut mh_samples: Vec<Vec<f64>> = Vec::new();
+    for chain_id in 0..cli.num_chains {
+        println!("Starting MH chain {}/{}", chain_id + 1, cli.num_chains);
+        mh_samples.extend(mh_sampler.run_chain(cli.iterations));
+    }
+
+    plot_momentum_std_vs_mass(potential, &all_samples, &mh_samples, &cli);
+
+    // Create scatter plot of chain samples with potential energy (capped at 2000 points)
+    let scatter_step = (all_samples.len() / 2000).max(1);
     let sample_data: Vec<(f64, f64)> = all_samples
         .iter()
+        .step_by(scatter_step)
         .map(|x| (x[0], potential(x)))
         .collect();
 
@@ -129,15 +226,9 @@ fn main() {
         .with_data(potential_data)
         .with_color("coral");
 
-    let plots: Vec<Plot> = vec![
-        samples_plot.into(),
-        potential_plot.into(),
-    ];
+    let plots: Vec<Plot> = vec![samples_plot.into(), potential_plot.into()];
 
-    let histogram_plots: Vec<Plot> = vec![
-        histogram_line.into(),
-        potential_line.into(),
-    ];
+    let histogram_plots: Vec<Plot> = vec![histogram_line.into(), potential_line.into()];
 
     let layout = Layout::auto_from_plots(&plots)
         .with_title("HMC Chain Samples and Potential Function")
